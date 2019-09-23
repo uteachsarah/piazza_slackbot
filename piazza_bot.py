@@ -10,6 +10,7 @@ This is a simple Slackbot that will poll Piazza every minute
 Every time a new post is observed a notification will be sent out
 """
 
+import ast
 import os
 import re
 
@@ -43,23 +44,32 @@ class Config():
 def main():
 
     # Read all relevant config variables
-    conf = config_env()
+    confs = config_env()
 
     # Setup Piazza
     piazza = Piazza()
-    piazza.user_login(email=conf.PIAZZA_EMAIL, password=conf.PIAZZA_PASSWORD)
-    network = piazza.network(conf.PIAZZA_ID)
+    # Piazza login is the same across all configs, so we use the first one
+    piazza.user_login(email=confs[0].PIAZZA_EMAIL, password=confs[0].PIAZZA_PASSWORD)
 
-    # Setup Slack
-    bot = Slacker(conf.SLACK_TOKEN)
+    bots = []
+    networks = []
+    last_ids = []
+    post_base_urls = []
+    slack_bot_names = []
+    slack_channels = []
+    for conf in confs:
+        network = piazza.network(conf.PIAZZA_ID)
+        last_ids.append(get_max_id(network.get_feed()['feed']))
+        post_base_urls.append("https://piazza.com/class/{}?cid=".format(conf.PIAZZA_ID))
+        networks.append(network)
+        # Setup Slack
+        bots.append(Slacker(conf.SLACK_TOKEN))
+        slack_bot_names.append(conf.SLACK_BOT_NAME)
+        slack_channels.append(conf.SLACK_CHANNEL)
 
-    # Get the last posted_id
-    last_id = get_max_id(network.get_feed()['feed'])
-    post_base_url = "https://piazza.com/class/{}?cid=".format(conf.PIAZZA_ID)
-    
     # Run loop
-    check_for_new_posts(network, bot, conf.SLACK_BOT_NAME, 
-                        conf.SLACK_CHANNEL, last_id, post_base_url)
+    check_for_new_posts(networks, bots, slack_bot_names, 
+                        slack_channels, last_ids, post_base_urls)
 
 
 # Collect env vars
@@ -69,25 +79,29 @@ def config_env():
     load_dotenv(find_dotenv())
 
     # Piazza specific
-    PIAZZA_ID = os.getenv("PIAZZA_ID")
+    PIAZZA_IDS = ast.literal_eval(os.getenv("PIAZZA_IDS"))
     PIAZZA_EMAIL = os.getenv("PIAZZA_EMAIL")
     PIAZZA_PASSWORD = os.getenv("PIAZZA_PASSWORD")
 
-    if not PIAZZA_ID or not PIAZZA_EMAIL or not PIAZZA_PASSWORD:
+    if not PIAZZA_IDS or not PIAZZA_EMAIL or not PIAZZA_PASSWORD:
         print("Missing Piazza credentials")
         exit(1)
 
     # Slack specific
-    SLACK_TOKEN = os.getenv("SLACK_TOKEN")
-    SLACK_CHANNEL = os.getenv("SLACK_CHANNEL")
-    SLACK_BOT_NAME = os.getenv("SLACK_BOT_NAME")
+    SLACK_TOKENS = ast.literal_eval(os.getenv("SLACK_TOKENS"))
+    SLACK_CHANNELS = ast.literal_eval(os.getenv("SLACK_CHANNELS"))
+    SLACK_BOT_NAMES = ast.literal_eval(os.getenv("SLACK_BOT_NAMES"))
 
-    if not SLACK_TOKEN or not SLACK_CHANNEL or not SLACK_BOT_NAME:
+    if not SLACK_TOKENS or not SLACK_CHANNELS or not SLACK_BOT_NAMES:
         print("Missing Slack credentials")
         exit(1)
 
-    return Config(PIAZZA_ID, PIAZZA_EMAIL, PIAZZA_PASSWORD,
-                  SLACK_TOKEN, SLACK_CHANNEL, SLACK_BOT_NAME)
+    confs = []
+    for i in range(len(PIAZZA_IDS)):
+        conf = Config(PIAZZA_IDS[i], PIAZZA_EMAIL, PIAZZA_PASSWORD,
+                      SLACK_TOKENS[i], SLACK_CHANNELS[i], SLACK_BOT_NAMES[i])
+        confs.append(conf)
+    return confs
 
 
 # This method exploits the fact that pinned posts have the field
@@ -102,56 +116,54 @@ def get_max_id(feed):
 
 # Method that polls Piazza in constant interval and posts new posts
 # to Slack
-def check_for_new_posts(network, bot, bot_name, channel, last_id,
-                        post_base_url, interval=60, include_link=True):
-    LAST_ID = last_id
+def check_for_new_posts(networks, bots, bot_names, channels, last_ids,
+                        post_base_urls, interval=60, include_link=True):
 
     # Keep looping
     while True:
-        try:
-            UPDATED_LAST_ID = get_max_id(network.get_feed()['feed'])
-            # For all the new posts
-            while UPDATED_LAST_ID > LAST_ID:
-
-                LAST_ID += 1
-
-                # Fetch post
-                post = network.get_post(LAST_ID)
-                if not post.get('history', None):
-                    continue
-                subject = "Piazza Bot \U0001F355 found a new post:"
-                content = post['history'][0]['subject']
+        for i in range(len(networks)):
+            try:
+                UPDATED_LAST_ID = get_max_id(networks[i].get_feed()['feed'])
+                # For all the new posts
+                while UPDATED_LAST_ID > last_ids[i]:
+                    last_ids[i] += 1
+                    # Fetch post
+                    post = networks[i].get_post(last_ids[i])
+                    if not post.get('history', None):
+                        continue
+                    subject = "Piazza Bot \U0001F355 found a new post:"
+                    content = post['history'][0]['subject']
                 
-                # subject = post['history'][0]['subject']
-                # content = re.findall(r'<p>(.*?)</p>', post['history'][0]['content'])[0]
+                    # subject = post['history'][0]['subject']
+                    # content = re.findall(r'<p>(.*?)</p>', post['history'][0]['content'])[0]
                     
-                # Create message and attach relevant parts
-                attachment = None
-                message = None
-                if include_link is True:
-                    attachment = [
-                        {
-                            "fallback": "New post on Piazza!",
-                            "title": subject,
-                            "title_link": post_base_url + str(UPDATED_LAST_ID),
-                            "text": content,
-                            "color": "good"
-                        }
-                    ]
-                else:
-                    message = "New post on Piazza!"
+                    # Create message and attach relevant parts
+                    attachment = None
+                    message = None
+                    if include_link is True:
+                        attachment = [
+                            {
+                                "fallback": "New post on Piazza!",
+                                "title": subject,
+                                "title_link": post_base_urls[i] + str(UPDATED_LAST_ID),
+                                "text": content,
+                                "color": "good"
+                            }
+                        ]
+                    else:
+                        message = "New post on Piazza!"
 
-                # Post message
-                bot.chat.post_message(channel,
-                                      message,
-                                      as_user=bot_name,
-                                      parse='full',
-                                      attachments=attachment)
-            print("Slack bot is up!")
-            sleep(interval)
-        except:
-            print("Error when attempting to get Piazza feed, going to sleep...")
-            sleep(interval)
+                    # Post message
+                    bots[i].chat.post_message(channel,
+                                              message,
+                                              as_user=bot_names[i],
+                                              parse='full',
+                                              attachments=attachment)
+                print("Slack bot is up!")
+                sleep(interval)
+            except:
+                print("Error when attempting to get Piazza feed, going to sleep...")
+                sleep(interval)
 
 # Main
 if __name__ == '__main__':
